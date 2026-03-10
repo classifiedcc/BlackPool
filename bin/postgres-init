@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+
+# Install PostgreSQL if not installed
+if ! dpkg -l | grep -q postgresql; then
+  sudo apt-get install -y postgresql postgresql-contrib
+fi
+
+# Check if PostgreSQL service is running
+if ! systemctl is-active --quiet postgresql; then
+  sudo systemctl start postgresql
+fi
+
+# Create user and database if they don't exist
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='satoshi'" | grep -q 1; then
+  sudo -u postgres psql -c "CREATE USER satoshi WITH PASSWORD 'nakamoto' SUPERUSER;"
+fi
+
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='ckpool'" | grep -q 1; then
+  sudo -u postgres psql -c "CREATE DATABASE ckpool OWNER satoshi;"
+fi
+
+# Modify pg_hba.conf to use md5 authentication for local connections
+PG_HBA_PATH=$(sudo -u postgres psql -t -c "SHOW hba_file;" | xargs)
+
+# Backup the original file
+if [ ! -f "${PG_HBA_PATH}.bak" ]; then
+    sudo cp $PG_HBA_PATH ${PG_HBA_PATH}.bak
+    echo "Backup created: ${PG_HBA_PATH}.bak"
+else
+    echo "Backup already exists, skipping backup creation"
+fi
+
+# Update the authentication method for local connections
+sudo sed -i '/^local.*all.*all.*peer/c\local all all md5' $PG_HBA_PATH
+sudo sed -i '/^host.*all.*all.*127.0.0.1\/32/c\host all all 127.0.0.1/32 md5' $PG_HBA_PATH
+
+# Reload PostgreSQL to apply changes
+sudo systemctl reload postgresql
+
+# Create table if it doesn't exist (now using -h localhost to force TCP connection)
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS shares (
+      id BIGSERIAL PRIMARY KEY,
+      blockheight INTEGER,
+      workinfoid BIGINT,
+      clientid BIGINT,
+      enonce1 TEXT,
+      nonce2 TEXT,
+      nonce TEXT,
+      ntime TEXT,
+      diff DOUBLE PRECISION,
+      sdiff DOUBLE PRECISION,
+      hash TEXT,
+      result BOOLEAN,
+      reject_reason TEXT,
+      error TEXT,
+      errn INTEGER,
+      createdate TEXT,
+      createby TEXT,
+      createcode TEXT,
+      createinet TEXT,
+      workername TEXT,
+      username TEXT,
+      lnurl TEXT,
+      address TEXT,
+      agent TEXT
+  )
+  "
+# Create blockheight index if it it does not exist
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE INDEX CONCURRENTLY IF NOT EXISTS
+      idx_shares_blockheight ON
+      shares (blockheight);
+  "
+
+# Create remote_share table if it doesn't exist (now using -h localhost to force TCP connection)
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS remote_shares (
+      id BIGINT,
+      origin TEXT,
+      blockheight INTEGER,
+      workinfoid BIGINT,
+      clientid BIGINT,
+      enonce1 TEXT,
+      nonce2 TEXT,
+      nonce TEXT,
+      ntime TEXT,
+      diff DOUBLE PRECISION,
+      sdiff DOUBLE PRECISION,
+      hash TEXT,
+      result BOOLEAN,
+      reject_reason TEXT,
+      error TEXT,
+      errn INTEGER,
+      createdate TEXT,
+      createby TEXT,
+      createcode TEXT,
+      createinet TEXT,
+      workername TEXT,
+      username TEXT,
+      lnurl TEXT,
+      address TEXT,
+      agent TEXT,
+
+      PRIMARY KEY (id, origin)
+  )
+  "
+# Create blockheight index if it it does not exist
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE INDEX CONCURRENTLY IF NOT EXISTS
+      idx_remote_shares_blockheight ON
+      remote_shares (blockheight);
+  "
+
+# This is wildly unacceptable and demonstrates why we made need to move to an internal query-library model
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE OR REPLACE FUNCTION compress_shares(
+      window_start_val BIGINT,
+      window_end_val BIGINT
+  ) RETURNS TABLE(id BIGINT, total_diff NUMERIC, workername TEXT) LANGUAGE plpgsql AS \$\$
+  DECLARE initial_results TEXT;
+          final_results TEXT;
+  BEGIN
+      -- calculate initial state for sanity check
+      WITH initial_data AS (
+          SELECT
+              MIN(shares.id)::BIGINT as min_id,
+              COALESCE(SUM(shares.diff), 0)::NUMERIC as total_diff,
+              COALESCE(shares.workername, '') as workername
+          FROM shares
+          WHERE shares.id > window_start_val AND shares.id <= window_end_val AND shares.result = true
+          GROUP BY shares.workername
+      )
+      SELECT string_agg(
+                     initial_data.min_id::text || '|' || initial_data.total_diff::text || '|' || initial_data.workername,
+                     ','
+                     ORDER BY min_id
+             )
+      INTO initial_results
+      FROM initial_data;
+
+      -- fix records with broken or 0 values for blockheight
+      UPDATE shares
+      SET blockheight = subq.fill_value
+      FROM (
+               SELECT
+                   s.id,
+                   MAX(CASE WHEN s.blockheight > 0 THEN s.blockheight END)
+                   OVER (
+                       ORDER BY s.id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                       ) as fill_value
+               FROM shares s
+               WHERE s.id > window_start_val AND s.id <= window_end_val
+           ) subq
+      WHERE shares.id > window_start_val AND shares.id <= window_end_val AND
+          shares.id = subq.id AND
+          shares.blockheight = 0 AND
+          subq.fill_value IS NOT NULL;
+
+      -- update share values by setting all except the first to 0 and the first to the sum of the others
+      UPDATE shares
+      SET diff = subq.total_diff, sdiff = subq.highest_diff
+      FROM (
+               SELECT
+                   s.workername,
+                   s.blockheight,
+                   MIN(s.id) as keep_id,
+                   SUM(s.diff) as total_diff,
+                   MAX(s.sdiff) as highest_diff
+               FROM shares s
+               WHERE s.id > window_start_val AND s.id <= window_end_val AND s.blockheight > 0 AND s.result = true
+               GROUP BY s.workername, s.blockheight
+           ) subq
+      WHERE shares.id > window_start_val AND shares.id <= window_end_val
+        AND shares.id = subq.keep_id;
+
+      -- remove the shares with diff 0
+      DELETE FROM shares
+      WHERE shares.id > window_start_val AND shares.id <= window_end_val AND
+          shares.id NOT IN (
+              SELECT MIN(s.id)
+              FROM shares s
+              WHERE s.id > window_start_val AND s.id <= window_end_val AND s.blockheight > 0 AND s.result = true
+              GROUP BY s.workername, s.blockheight
+          ) AND
+          shares.blockheight > 0;
+
+      -- calculate final output values for sanity check
+      WITH final_data AS (
+          SELECT
+              MIN(shares.id) as min_id,
+              COALESCE(SUM(shares.diff), 0) as total_diff,
+              COALESCE(shares.workername, '') as workername
+          FROM shares
+          WHERE shares.id > window_start_val AND shares.id <= window_end_val AND shares.result = true
+          GROUP BY shares.workername
+      )
+      SELECT string_agg(
+                     final_data.min_id::text || '|' || final_data.total_diff::text || '|' || final_data.workername,
+                     ','
+                     ORDER BY min_id
+             )
+      INTO final_results
+      FROM final_data;
+
+      -- reject the unexpected case that a workername is now seeing a different total number of shares O_O
+      IF initial_results != final_results THEN
+          RAISE EXCEPTION 'Data integrity check failed for window % to %: grouped results changed during processing. Initial: %, Final: %',
+              window_start_val, window_end_val, initial_results, final_results;
+      END IF;
+
+      -- return aggregate data for safety check
+      RETURN QUERY
+          SELECT
+              MIN(shares.id)::BIGINT as id,
+              SUM(shares.diff)::NUMERIC as total_diff,
+              shares.workername
+          FROM shares
+          WHERE shares.id > window_start_val AND shares.id <= window_end_val AND shares.result = true
+          GROUP BY shares.workername
+          ORDER BY MIN(shares.id);
+  END \$\$;
+  "
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(128) NOT NULL,
+      btcaddress BOOLEAN DEFAULT FALSE,
+      lightning_address VARCHAR(255),
+      workername VARCHAR(255),
+      script BOOLEAN,
+      segwit BOOLEAN,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      UNIQUE(username, lightning_address)
+  )
+  "
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS blocks (
+      id SERIAL PRIMARY KEY,
+      blockheight INTEGER UNIQUE NOT NULL,
+      blockhash VARCHAR(64) NOT NULL,
+      confirmed BOOLEAN DEFAULT FALSE,
+      workername VARCHAR(255),
+      username VARCHAR(128),
+      diff DOUBLE PRECISION,
+      time_found TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      coinbasevalue BIGINT,
+      rewards_processed BOOLEAN DEFAULT FALSE
+  )
+  "
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  INSERT INTO blocks (blockheight, blockhash, confirmed)
+  SELECT 0, '0000000000000000000000000000000000000000000000000000000000000000', FALSE
+  WHERE NOT EXISTS (SELECT 1 FROM blocks);
+"
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS accounts
+  (
+      id               BIGSERIAL PRIMARY KEY,
+      username         VARCHAR(128) NOT NULL UNIQUE,
+      lnurl            VARCHAR(255),
+      past_lnurls      JSONB                    DEFAULT '[]'::JSONB,
+      total_diff       BIGINT                   DEFAULT 0,
+      lnurl_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  )
+  "
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts (username);
+  CREATE INDEX IF NOT EXISTS idx_accounts_lnurl ON accounts (lnurl);
+  CREATE INDEX IF NOT EXISTS idx_accounts_past_lnurls ON accounts USING GIN (past_lnurls);
+"
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS account_metadata
+  (
+      id          BIGSERIAL PRIMARY KEY,
+      account_id  BIGINT       NOT NULL REFERENCES accounts (id) ON DELETE CASCADE UNIQUE,
+      data        JSONB        NOT NULL DEFAULT '{}'::JSONB,
+      created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  )
+  "
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE INDEX IF NOT EXISTS idx_account_metadata_account_id ON account_metadata (account_id);
+"
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE TABLE IF NOT EXISTS payouts
+  (
+      id                BIGSERIAL PRIMARY KEY,
+      account_id        BIGINT         NOT NULL REFERENCES accounts (id) ON DELETE RESTRICT,
+      amount            BIGINT         NOT NULL,
+      diff_paid         BIGINT         NOT NULL,
+      blockheight_start INTEGER        NOT NULL,
+      blockheight_end   INTEGER        NOT NULL,
+      status            VARCHAR(20)    NOT NULL  DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'success', 'failure', 'cancelled')),
+      attempts          SMALLINT       NOT NULL  DEFAULT 0,
+      failure_reason    TEXT,
+      transaction_id    VARCHAR(64),
+      created_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      processed_at      TIMESTAMP WITH TIME ZONE,
+
+      CONSTRAINT valid_blockheight_range CHECK (blockheight_end >= blockheight_start),
+      CONSTRAINT unique_payout_per_block UNIQUE (account_id, blockheight_end)
+  )
+  "
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE INDEX IF NOT EXISTS idx_payouts_accounts_id ON payouts (account_id);
+  CREATE INDEX IF NOT EXISTS idx_payouts_status ON payouts (status);
+  CREATE INDEX IF NOT EXISTS idx_payouts_blockheight_range ON payouts (blockheight_start, blockheight_end);
+  CREATE INDEX IF NOT EXISTS idx_payouts_created_at ON payouts (created_at);
+  CREATE INDEX IF NOT EXISTS idx_payouts_user_status ON payouts (account_id, status);
+"
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE OR REPLACE FUNCTION update_payouts_modified()
+      RETURNS TRIGGER AS
+  \$\$
+  BEGIN
+      NEW.updated_at = NOW();
+
+      IF OLD.status IS DISTINCT FROM NEW.status AND NEW.status IN ('success', 'failure') THEN
+          NEW.processed_at = NOW();
+      END IF;
+
+      RETURN NEW;
+  END;
+  \$\$ LANGUAGE plpgsql;
+
+  CREATE OR REPLACE TRIGGER update_payouts_modtime
+      BEFORE UPDATE
+      ON payouts
+      FOR EACH ROW
+  EXECUTE FUNCTION update_payouts_modified();
+  "
+
+PGPASSWORD="nakamoto" psql -h localhost -U satoshi -d ckpool -c "
+  CREATE OR REPLACE FUNCTION refresh_accounts()
+      RETURNS BIGINT AS
+  \$\$
+  DECLARE
+      rows_affected BIGINT;
+  BEGIN
+      INSERT INTO accounts (username, lnurl, past_lnurls, total_diff, created_at, updated_at)
+      WITH latest_lnurl AS (SELECT DISTINCT ON (TRIM(BOTH ' ' FROM username)) username,
+                                                                              LEFT(TRIM(BOTH ' ' FROM lnurl), 255) AS latest_lnurl,
+                                                                              id
+                            FROM remote_shares
+                            WHERE username IS NOT NULL
+                              AND TRIM(BOTH ' ' FROM username) != ''
+                            ORDER BY TRIM(BOTH ' ' FROM username), id DESC),
+           aggregated_data AS (SELECT TRIM(BOTH ' ' FROM rs.username)                                                         AS username,
+                                      ll.latest_lnurl,
+                                      jsonb_agg(DISTINCT TRIM(BOTH ' ' FROM rs.lnurl)
+                                      ORDER BY TRIM(BOTH ' ' FROM rs.lnurl))
+                                      FILTER (WHERE rs.lnurl IS NOT NULL AND TRIM(BOTH ' ' FROM rs.lnurl) != ll.latest_lnurl) AS past_lnurls,
+                                      COALESCE(SUM(rs.diff), 0)                                                               AS total_diff
+                               FROM remote_shares rs
+                                        INNER JOIN latest_lnurl ll ON rs.username = ll.username
+                               WHERE rs.username IS NOT NULL
+                                 AND TRIM(BOTH ' ' FROM rs.username) != ''
+                                 AND rs.result = true
+                               GROUP BY TRIM(BOTH ' ' FROM rs.username), ll.latest_lnurl)
+      SELECT username,
+             latest_lnurl,
+             COALESCE(past_lnurls, '[]'::jsonb) AS past_lnurls,
+             total_diff,
+             NOW()                              AS created_at,
+             NOW()                              AS updated_at
+      FROM aggregated_data
+      ON CONFLICT (username) DO UPDATE
+          SET lnurl            = COALESCE(accounts.lnurl, EXCLUDED.lnurl),
+              past_lnurls      = COALESCE(accounts.past_lnurls, EXCLUDED.past_lnurls),
+              total_diff       = EXCLUDED.total_diff,
+              lnurl_updated_at = CASE
+                                     WHEN accounts.lnurl IS DISTINCT FROM EXCLUDED.lnurl
+                                         THEN NOW()
+                                     ELSE accounts.lnurl_updated_at
+                  END,
+              updated_at       = NOW();
+
+      GET DIAGNOSTICS rows_affected = ROW_COUNT;
+
+      INSERT INTO account_metadata (account_id, data, created_at, updated_at)
+      SELECT a.id,
+             jsonb_build_object('block_count', block_counts.cnt, 'highest_blockheight', block_counts.max_bh),
+             NOW(),
+             NOW()
+      FROM accounts a
+               INNER JOIN (SELECT TRIM(BOTH ' ' FROM username) AS username,
+                                  COUNT(DISTINCT blockheight)  AS cnt,
+                                  MAX(blockheight)             AS max_bh
+                           FROM remote_shares
+                           WHERE username IS NOT NULL
+                             AND TRIM(BOTH ' ' FROM username) != ''
+                             AND result = true
+                           GROUP BY TRIM(BOTH ' ' FROM username)) block_counts ON a.username = block_counts.username
+      ON CONFLICT (account_id) DO UPDATE
+          SET data       = account_metadata.data || jsonb_build_object('block_count', EXCLUDED.data -> 'block_count',
+                                                                       'highest_blockheight',
+                                                                       EXCLUDED.data -> 'highest_blockheight'
+                                                    ),
+              updated_at = NOW();
+
+      RETURN rows_affected;
+  END;
+  \$\$ LANGUAGE plpgsql;
+  "
+
+echo "PostgreSQL is running"
+echo "Database: ckpool"
+echo "User: satoshi"
+echo "Password: nakamoto"
+echo "Table: shares with columns (id, data, created_at)"
+echo "Connection string: dbname=ckpool user=satoshi password=nakamoto host=localhost"

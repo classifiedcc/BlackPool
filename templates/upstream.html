@@ -1,0 +1,151 @@
+<style>
+  .nav-arrow {
+    color: #888;
+    text-decoration: none;
+    padding: 0 8px;
+  }
+  .nav-arrow:hover {
+    color: #eee;
+  }
+</style>
+
+<div class="grid grid-stack">
+  <div class=column>
+    <h2 id=upstream-title></h2>
+    <div class=row><span>Endpoint</span><span id=endpoint></span></div>
+    <div class=row><span>Status</span><span id=status></span></div>
+    <div class=row><span>Ping</span><span><span id=ping_ms></span>ms</span></div>
+    <div class=row><span>Username</span><span id=username class=copyable></span></div>
+    <div class=row><span>Difficulty</span><span id=difficulty class=copyable></span></div>
+    <div class=row><span>Extranonce1</span><span id=enonce1></span></div>
+    <div class=row><span>Extranonce2 Size</span><span id=enonce2_size></span></div>
+    <div class=row><span>Version Mask</span><span id=version_mask></span></div>
+    <div class=row><span>Rejected Shares</span><span id=upstream_rejected class=copyable></span></div>
+    <div class=row><span>Rejected Work</span><span id=upstream_rejected_work class=copyable></span></div>
+    <div class=row><span>Delivered Work</span><span id=upstream_total_work></span></div>
+    <div class=row><span>Delivered PHd</span><span id=upstream_ph_days class=copyable></span></div>
+  </div>
+
+  <div class=column>
+    <h2>Downstream</h2>
+    <div class=row><span>Users</span><span id=users></span></div>
+    <div class=row><span>Workers</span><span id=workers></span></div>
+    <div class=row><span>Sessions</span><span id=sessions></span></div>
+    <div class=row><span>Hashrate</span><span id=hashrate_1m></span></div>
+    <div class=row><span>SPS</span><span id=sps_1m></span></div>
+    <div class=row><span>Uptime</span><span><span id=uptime_secs></span>s</span></div>
+    <div class=row><span>Best Share</span><span id=best_share class=copyable></span></div>
+    <div class=row><span>Last Share</span><span><span id=last_share></span>s ago</span></div>
+    <div class=row><span>Rejected Shares</span><span id=rejected_shares class=copyable></span></div>
+    <div class=row><span>Rejected Work</span><span id=rejected_work class=copyable></span></div>
+    <div class=row><span>Received Work</span><span id=received_work></span></div>
+    <div class=row><span>Received PHd</span><span id=ph_days class=copyable></span></div>
+  </div>
+
+  <div class="column column-full">
+    <h2>Workers</h2>
+    <table id=workers-table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Sessions</th>
+          <th>Hashrate</th>
+          <th>SPS</th>
+          <th>Best Share</th>
+          <th>PHd</th>
+          <th>Last Share</th>
+        </tr>
+      </thead>
+      <tbody id=workers-list></tbody>
+    </table>
+  </div>
+
+  <div class="column column-full">
+    <h2>Sessions</h2>
+    <table id=sessions-table>
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Hashrate</th>
+          <th>SPS</th>
+          <th>Best Share</th>
+          <th>PHd</th>
+          <th>Last Share</th>
+        </tr>
+      </thead>
+      <tbody id=sessions-list></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const upstreamId = window.location.pathname.split('/').filter(Boolean).pop();
+
+document.title = document.title.replace('Upstream', `Upstream ${upstreamId}`);
+document.querySelector('h1').childNodes[0].textContent = `Router | Upstream ${upstreamId}`;
+
+let upstreamIds = [];
+fetch('/api/router/status').then(r => r.json()).then(data => {
+  upstreamIds = (data.slots || []).map(s => s.upstream_id);
+  updateNav();
+}).catch(() => {});
+
+function updateNav() {
+  const el = document.getElementById('upstream-title');
+  if (!el || upstreamIds.length < 2) {
+    if (el) el.textContent = `Upstream ${upstreamId}`;
+    return;
+  }
+  const idx = upstreamIds.indexOf(Number(upstreamId));
+  const prevId = upstreamIds[(idx - 1 + upstreamIds.length) % upstreamIds.length];
+  const nextId = upstreamIds[(idx + 1) % upstreamIds.length];
+  el.innerHTML = `<a href="/upstream/${prevId}" class="nav-arrow">\u25C0</a> Upstream ${upstreamId} <a href="/upstream/${nextId}" class="nav-arrow">\u25B6</a>`;
+}
+updateNav();
+
+async function refresh(signal) {
+  try {
+    const data = await fetch(`/api/router/upstream/${upstreamId}`, { signal }).then(r => r.json()).catch(() => null);
+
+    if (!data) {
+      document.querySelector('.grid').innerHTML = '<div class="column column-full"><h2>Upstream Not Found</h2></div>';
+      return;
+    }
+
+    const upstream = data.upstream;
+    set('endpoint', upstream.endpoint);
+    set('status', upstream.connected ? 'Connected' : 'Disconnected');
+    setClass('status', upstream.connected ? 'connected' : 'disconnected');
+    set('ping_ms', upstream.ping_ms, formatPing);
+    copyable('username', truncateMiddle(upstream.username), upstream.username);
+    copyable('difficulty', formatDifficulty(upstream.difficulty), upstream.difficulty);
+    set('enonce1', upstream.enonce1);
+    set('enonce2_size', upstream.enonce2_size);
+    set('version_mask', upstream.version_mask);
+    rejectionCopyable('upstream_rejected', upstream.accepted, upstream.rejected);
+    set('upstream_total_work', (upstream.accepted_work || 0) + (upstream.rejected_work || 0), formatDifficulty);
+    copyable('upstream_ph_days', formatPhDays(upstream.ph_days), upstream.ph_days);
+    rejectionWorkCopyable('upstream_rejected_work', upstream.accepted_work, upstream.rejected_work);
+
+    set('users', data.user_count);
+    set('workers', data.worker_count);
+    set('sessions', data.session_count);
+    set('hashrate_1m', data.hashrate_1m, formatHashrate);
+    set('sps_1m', data.sps_1m, formatTruncated);
+    set('uptime_secs', data.uptime_secs);
+    rejectionCopyable('rejected_shares', data.accepted_shares, data.rejected_shares);
+    rejectionWorkCopyable('rejected_work', data.accepted_work, data.rejected_work);
+    set('last_share', data.last_share);
+    copyable('best_share', formatDifficulty(data.best_share), data.best_share);
+    set('received_work', data.accepted_work, formatDifficulty);
+    copyable('ph_days', formatPhDays(data.ph_days), data.ph_days);
+
+    document.getElementById('workers-list').innerHTML = renderWorkerRows(data.workers || []);
+    document.getElementById('sessions-list').innerHTML = renderSessionRows(data.sessions || []);
+
+  } catch (e) { if (e.name !== 'AbortError') console.error('refresh error:', e); }
+}
+initDelegatedCopyables('sessions-list');
+startPolling(refresh);
+initCopyables();
+</script>

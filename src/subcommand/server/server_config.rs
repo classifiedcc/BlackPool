@@ -1,0 +1,122 @@
+use super::*;
+
+#[derive(Clone, Debug, Parser)]
+pub(crate) struct ServerConfig {
+    #[arg(long, help = "Require <ADMIN_TOKEN> for HTTP authentication.")]
+    admin_token: Option<String>,
+    #[arg(long, help = "Require <API_TOKEN> for HTTP authentication.")]
+    api_token: Option<String>,
+    #[arg(long, help = "Listen at <ADDRESS>.")]
+    address: Option<String>,
+    #[arg(long, help = "Request ACME TLS certificate for <ACME_DOMAIN>.")]
+    acme_domain: Vec<String>,
+    #[arg(long, help = "Provide ACME contact <ACME_CONTACT>.")]
+    acme_contact: Vec<String>,
+    #[arg(
+        long,
+        help = "The <CHANNEL> at ntfy.sh to use for block found notifications."
+    )]
+    alerts_ntfy_channel: Option<String>,
+    #[arg(long, alias = "datadir", help = "Store acme cache in <DATA_DIR>.")]
+    data_dir: Option<PathBuf>,
+    #[arg(long, help = "Connect to Postgres running at <DATABASE_URL>.")]
+    database_url: Option<String>,
+    #[arg(long, help = "CKpool <LOG_DIR>.")]
+    log_dir: Option<PathBuf>,
+    #[arg(long, help = "Listen on <PORT>.")]
+    port: Option<u16>,
+    #[arg(long, help = "Collect statistics from <NODES>.")]
+    nodes: Vec<Url>,
+    #[arg(long, help = "Send shares to HTTP <SYNC_ENDPOINT>.")]
+    sync_endpoint: Option<String>,
+    #[arg(long, help = "Cache <TTL> in seconds.", default_value = "30")]
+    ttl: u64,
+    #[arg(long, help = "Run account migration before processing sync batches.")]
+    migrate_accounts: bool,
+}
+
+impl ServerConfig {
+    pub(crate) fn address(&self) -> String {
+        self.address.clone().unwrap_or_else(|| "0.0.0.0".into())
+    }
+
+    pub(crate) fn acme_cache(&self) -> PathBuf {
+        self.data_dir().join("acme-cache")
+    }
+
+    pub(crate) fn acme_contacts(&self) -> Vec<String> {
+        self.acme_contact.clone()
+    }
+
+    pub(crate) fn alerts_ntfy_channel(&self) -> Option<String> {
+        self.alerts_ntfy_channel.clone()
+    }
+
+    pub(crate) fn admin_token(&self) -> Option<&str> {
+        self.admin_token.as_deref()
+    }
+
+    pub(crate) fn api_token(&self) -> Option<&str> {
+        self.api_token.as_deref()
+    }
+
+    pub(crate) fn domain(&self) -> String {
+        self.domains()
+            .expect("should have domain")
+            .first()
+            .expect("should have domain")
+            .clone()
+    }
+
+    pub(crate) fn domains(&self) -> Result<Vec<String>> {
+        if !self.acme_domain.is_empty() {
+            Ok(self.acme_domain.clone())
+        } else {
+            Ok(vec![
+                System::host_name().ok_or(anyhow!("no hostname found"))?,
+            ])
+        }
+    }
+
+    pub(crate) fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone().unwrap_or_default()
+    }
+
+    pub(crate) fn database_url(&self) -> String {
+        self.database_url
+            .clone()
+            .unwrap_or_else(|| "postgres://satoshi:nakamoto@127.0.0.1:5432/ckpool".to_string())
+    }
+
+    pub(crate) fn log_dir(&self) -> PathBuf {
+        let dir = self.log_dir.clone().unwrap_or_else(|| {
+            std::env::current_dir().expect("Failed to get current working directory")
+        });
+
+        if !dir.exists() {
+            warn!("Log dir {} does not exist", dir.display());
+        }
+
+        dir
+    }
+
+    pub(crate) fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    pub(crate) fn nodes(&self) -> Vec<Url> {
+        self.nodes.clone()
+    }
+
+    pub(crate) fn sync_endpoint(&self) -> Option<String> {
+        self.sync_endpoint.clone()
+    }
+
+    pub(crate) fn ttl(&self) -> Duration {
+        Duration::from_secs(self.ttl)
+    }
+
+    pub(crate) fn migrate_accounts(&self) -> bool {
+        self.migrate_accounts
+    }
+}

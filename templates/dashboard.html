@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang=en>
+<head>
+  <meta charset=utf-8>
+  <meta name=viewport content='width=device-width,initial-scale=1.0'>
+  <title>{{ self.content.title() }}</title>
+  <link rel=icon href=/static/blackpool.svg type=image/x-icon size=16x16>
+  <link rel=stylesheet href=/static/dashboard.css>
+  <script src=/static/dashboard.js></script>
+</head>
+<body>
+<a href="/"><img src=/static/blackpool.svg alt="" class=logo></a>
+<h1>{{ self.content.title() }}<sup> {{ self.superscript() }}</sup></h1>
+<div class=wrapper>
+$$ Trusted(&self.content)
+</div>
+<a href=https://github.com/classifiedcc/blackpool target=_blank rel=noopener><img src=/static/blackpool.svg alt="" class=logo></a>
+%% if !env!("GIT_BRANCH").is_empty() || !env!("GIT_COMMIT").is_empty() {
+<div class=git-info>
+%% if !env!("GIT_BRANCH").is_empty() {
+<span>{{ env!("GIT_BRANCH") }}</span>
+%% }
+%% if !env!("GIT_BRANCH").is_empty() && !env!("GIT_COMMIT").is_empty() {
+<span> | </span>
+%% }
+%% if !env!("GIT_COMMIT").is_empty() {
+<span><a href="https://github.com/classifiedcc/blackpool/commit/{{ env!("GIT_COMMIT") }}" target=_blank rel=noopener>{{ &env!("GIT_COMMIT")[..7] }}</a></span>
+%% }
+</div>
+%% }
+</body>
+</html>

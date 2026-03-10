@@ -1,0 +1,506 @@
+use {
+    crate::address,
+    blackpool::subcommand::sync::{FoundBlockRecord, Share},
+};
+
+pub(crate) fn create_test_shares(count: u32, blockheight: i64) -> Vec<Share> {
+    (0..count)
+        .map(|i| Share {
+            id: i as i64 + 1,
+            blockheight: Some(blockheight as i32),
+            workinfoid: Some(i as i64 + 1000),
+            clientid: Some(i as i64 + 100),
+            enonce1: Some(format!("enonce1_{}", i)),
+            nonce2: Some(format!("nonce2_{}", i)),
+            nonce: Some(format!("nonce_{}", i)),
+            ntime: Some("507f1f77".to_string()),
+            diff: Some(1000.0 + i as f64),
+            sdiff: Some(500.0 + i as f64),
+            hash: Some(format!("hash_{:064x}", i)),
+            result: Some(true),
+            reject_reason: None,
+            error: None,
+            errn: None,
+            createdate: Some("2024-01-01 12:00:00".to_string()),
+            createby: Some("ckpool".to_string()),
+            createcode: Some("".to_string()),
+            createinet: Some("127.0.0.1".to_string()),
+            workername: Some(format!("worker_{}", i % 5)),
+            username: Some(format!("user_{}", i % 10)),
+            lnurl: Some(format!("lnurl{}@test.gov", i)),
+            address: Some(address(i % 10u32).to_string()),
+            agent: Some("test-agent".to_string()),
+        })
+        .collect()
+}
+
+pub fn create_shares_for_user(username: &str, blockheights: &[i32], base_id: i64) -> Vec<Share> {
+    blockheights
+        .iter()
+        .enumerate()
+        .map(|(i, &blockheight)| Share {
+            id: base_id + i as i64,
+            blockheight: Some(blockheight),
+            workinfoid: Some(1000),
+            clientid: Some(100),
+            enonce1: Some(format!("enonce1_{}", i)),
+            nonce2: Some(format!("nonce2_{}", i)),
+            nonce: Some(format!("nonce_{}", i)),
+            ntime: Some("507f1f77".to_string()),
+            diff: Some(1000.0),
+            sdiff: Some(500.0),
+            hash: Some(format!("hash_{:064x}", i)),
+            result: Some(true),
+            reject_reason: None,
+            error: None,
+            errn: None,
+            createdate: Some("2024-01-01 12:00:00".to_string()),
+            createby: Some("ckpool".to_string()),
+            createcode: Some("".to_string()),
+            createinet: Some("127.0.0.1".to_string()),
+            workername: Some(format!("{}_worker", username)),
+            username: Some(username.to_string()),
+            lnurl: Some(format!("{}@test.com", username)),
+            address: Some("tb1qtest".to_string()),
+            agent: Some("test-agent".to_string()),
+        })
+        .collect()
+}
+
+pub(crate) fn create_test_block(blockheight: i64) -> FoundBlockRecord {
+    FoundBlockRecord {
+        id: blockheight as i32,
+        blockheight: blockheight as i32,
+        blockhash: format!(
+            "00000000000000000008a89e854d57e5667df88f1bc3ba94de4c2d1f8c{:08x}",
+            blockheight
+        ),
+        confirmed: Some(true),
+        workername: Some("test_worker".to_string()),
+        username: Some("test_user".to_string()),
+        diff: Some(1000000.0),
+        coinbasevalue: Some(625000000),
+        rewards_processed: Some(false),
+    }
+}
+
+pub(crate) async fn setup_test_schema(db_url: String) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    sqlx::query(
+        r#"
+                CREATE TABLE IF NOT EXISTS shares (
+                    id BIGSERIAL PRIMARY KEY,
+                    blockheight INTEGER,
+                    workinfoid BIGINT,
+                    clientid BIGINT,
+                    enonce1 TEXT,
+                    nonce2 TEXT,
+                    nonce TEXT,
+                    ntime TEXT,
+                    diff DOUBLE PRECISION,
+                    sdiff DOUBLE PRECISION,
+                    hash TEXT,
+                    result BOOLEAN,
+                    reject_reason TEXT,
+                    error TEXT,
+                    errn INTEGER,
+                    createdate TEXT,
+                    createby TEXT,
+                    createcode TEXT,
+                    createinet TEXT,
+                    workername TEXT,
+                    username TEXT,
+                    lnurl TEXT,
+                    address TEXT,
+                    agent TEXT
+                )
+                "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+    CREATE TABLE IF NOT EXISTS remote_shares (
+        id BIGINT,
+        origin TEXT,
+        blockheight INTEGER,
+        workinfoid BIGINT,
+        clientid BIGINT,
+        enonce1 TEXT,
+        nonce2 TEXT,
+        nonce TEXT,
+        ntime TEXT,
+        diff DOUBLE PRECISION,
+        sdiff DOUBLE PRECISION,
+        hash TEXT,
+        result BOOLEAN,
+        reject_reason TEXT,
+        error TEXT,
+        errn INTEGER,
+        createdate TEXT,
+        createby TEXT,
+        createcode TEXT,
+        createinet TEXT,
+        workername TEXT,
+        username TEXT,
+        lnurl TEXT,
+        address TEXT,
+        agent TEXT,
+
+        PRIMARY KEY (id, origin)
+    )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE TABLE IF NOT EXISTS blocks (
+                    id SERIAL PRIMARY KEY,
+                    blockheight INTEGER UNIQUE NOT NULL,
+                    blockhash TEXT NOT NULL,
+                    confirmed BOOLEAN,
+                    workername TEXT,
+                    username TEXT,
+                    diff DOUBLE PRECISION,
+                    time_found TEXT,
+                    coinbasevalue BIGINT,
+                    rewards_processed BOOLEAN
+                )
+                "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE TABLE IF NOT EXISTS accounts
+                (
+                    id               BIGSERIAL PRIMARY KEY,
+                    username         VARCHAR(128) NOT NULL UNIQUE,
+                    lnurl            VARCHAR(255),
+                    past_lnurls      JSONB                    DEFAULT '[]'::JSONB,
+                    total_diff       BIGINT                   DEFAULT 0,
+                    lnurl_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE TABLE IF NOT EXISTS payouts (
+                    id                BIGSERIAL PRIMARY KEY,
+                    account_id        BIGINT         NOT NULL REFERENCES accounts (id) ON DELETE RESTRICT,
+                    amount            BIGINT         NOT NULL,
+                    diff_paid         BIGINT         NOT NULL,
+                    blockheight_start INTEGER        NOT NULL,
+                    blockheight_end   INTEGER        NOT NULL,
+                    status            VARCHAR(20)    NOT NULL  DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'success', 'failure', 'cancelled')),
+                    attempts          SMALLINT       NOT NULL  DEFAULT 0,
+                    failure_reason    TEXT,
+                    transaction_id    VARCHAR(64),
+                    created_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    processed_at      TIMESTAMP WITH TIME ZONE
+                )
+                "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE TABLE IF NOT EXISTS account_metadata
+                (
+                    id          BIGSERIAL PRIMARY KEY,
+                    account_id  BIGINT       NOT NULL REFERENCES accounts (id) ON DELETE CASCADE UNIQUE,
+                    data        JSONB        NOT NULL DEFAULT '{}'::JSONB,
+                    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE OR REPLACE FUNCTION compress_shares(start_id BIGINT, end_id BIGINT)
+                RETURNS BIGINT AS $$
+                BEGIN
+                    -- This is a dummy function for testing
+                    -- In production, this would implement actual compression logic
+                    RETURN (SELECT COUNT(*) FROM shares WHERE id >= start_id AND id <= end_id);
+                END;
+                $$ LANGUAGE plpgsql;
+                "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+                CREATE OR REPLACE FUNCTION refresh_accounts()
+      RETURNS BIGINT AS
+  $$
+  DECLARE
+      rows_affected BIGINT;
+  BEGIN
+      INSERT INTO accounts (username, lnurl, past_lnurls, total_diff, created_at, updated_at)
+      WITH latest_lnurl AS (SELECT DISTINCT ON (username) username,
+                                                          TRIM(BOTH ' ' FROM lnurl) AS latest_lnurl,
+                                                          id
+                            FROM remote_shares
+                            WHERE username IS NOT NULL
+                              AND username != ''
+                            ORDER BY username, id DESC),
+           aggregated_data AS (SELECT TRIM(BOTH ' ' FROM rs.username) AS username,
+                                      ll.latest_lnurl,
+                                      jsonb_agg(DISTINCT TRIM(BOTH ' ' FROM rs.lnurl) ORDER BY TRIM(BOTH ' ' FROM rs.lnurl))
+                                      FILTER (WHERE rs.lnurl IS NOT NULL AND TRIM(BOTH ' ' FROM rs.lnurl) != ll.latest_lnurl) AS past_lnurls,
+                                      COALESCE(SUM(rs.diff), 0)                                                               AS total_diff
+                               FROM remote_shares rs
+                                        INNER JOIN latest_lnurl ll ON rs.username = ll.username
+                               WHERE rs.username IS NOT NULL
+                                 AND rs.username != ''
+                                 AND rs.result = true
+                               GROUP BY rs.username, ll.latest_lnurl)
+      SELECT username,
+             latest_lnurl,
+             COALESCE(past_lnurls, '[]'::jsonb) AS past_lnurls,
+             total_diff,
+             NOW()                              AS created_at,
+             NOW()                              AS updated_at
+      FROM aggregated_data
+      ON CONFLICT (username) DO UPDATE
+          SET lnurl            = EXCLUDED.lnurl,
+              past_lnurls      = CASE
+                                     WHEN accounts.lnurl IS DISTINCT FROM EXCLUDED.lnurl
+                                         AND accounts.lnurl IS NOT NULL
+                                         AND NOT (accounts.past_lnurls @> jsonb_build_array(accounts.lnurl))
+                                         THEN accounts.past_lnurls || jsonb_build_array(accounts.lnurl) ||
+                                              EXCLUDED.past_lnurls
+                                     ELSE accounts.past_lnurls || EXCLUDED.past_lnurls
+                  END,
+              total_diff       = EXCLUDED.total_diff,
+              lnurl_updated_at = CASE
+                                     WHEN accounts.lnurl IS DISTINCT FROM EXCLUDED.lnurl
+                                         THEN NOW()
+                                     ELSE accounts.lnurl_updated_at
+                  END,
+              updated_at       = NOW();
+
+      GET DIAGNOSTICS rows_affected = ROW_COUNT;
+      RETURN rows_affected;
+  END;
+  $$ LANGUAGE plpgsql;
+                "#,
+    )
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+pub(crate) async fn insert_test_shares(
+    db: String,
+    count: u32,
+    blockheight: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&db).await?;
+
+    for i in 0..count {
+        sqlx::query(
+            r#"
+                    INSERT INTO shares (
+                        blockheight, workinfoid, clientid, enonce1, nonce2, nonce,
+                        ntime, diff, sdiff, hash, result, workername, username, address
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    "#,
+        )
+        .bind(blockheight)
+        .bind(i as i64 + 1000)
+        .bind(i as i64 + 100)
+        .bind(format!("enonce1_{}", i))
+        .bind(format!("nonce2_{}", i))
+        .bind(format!("nonce_{}", i))
+        .bind("507f1f77")
+        .bind(1000.0 + i as f64)
+        .bind(500.0 + i as f64)
+        .bind(format!("hash_{:064x}", i))
+        .bind(true)
+        .bind(format!("worker_{}", i % 5))
+        .bind(format!("user_{}", i % 10))
+        .bind(address(i % 10).to_string())
+        .execute(&pool)
+        .await?;
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+pub(crate) async fn insert_test_remote_shares(
+    db: String,
+    count: u32,
+    blockheight: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&db).await?;
+
+    for i in 0..count {
+        sqlx::query(
+            r#"
+                    INSERT INTO remote_shares (
+                                               id, origin,
+                        blockheight, workinfoid, clientid, enonce1, nonce2, nonce,
+                        ntime, diff, sdiff, hash, result, workername, username, lnurl, address
+                    ) VALUES (COALESCE((SELECT MAX(id) FROM remote_shares WHERE origin = 'test_origin'), 0) + 1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    "#,
+        )
+            .bind("test_origin")
+            .bind(blockheight)
+            .bind(i as i64 + 1000)
+            .bind(i as i64 + 100)
+            .bind(format!("enonce1_{}", i))
+            .bind(format!("nonce2_{}", i))
+            .bind(format!("nonce_{}", i))
+            .bind("507f1f77")
+            .bind(1000.0 + i as f64)
+            .bind(500.0 + i as f64)
+            .bind(format!("hash_{:064x}", i))
+            .bind(true)
+            .bind(format!("worker_{}", i % 5))
+            .bind(format!("user_{}", i % 10))
+            .bind(format!("lnurl{}@test.gov", i % 10))
+            .bind(address(i % 10).to_string())
+            .execute(&pool)
+            .await?;
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+pub(crate) async fn insert_test_account(
+    db_url: String,
+    username: &str,
+    lnurl: Option<&str>,
+    past_lnurls: Vec<String>,
+    total_diff: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&db_url).await?;
+
+    let past_lnurls_json = serde_json::to_value(past_lnurls)?;
+
+    sqlx::query(
+        "
+        INSERT INTO accounts (username, lnurl, past_lnurls, total_diff, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, NOW(), NOW())
+        ",
+    )
+    .bind(username)
+    .bind(lnurl)
+    .bind(past_lnurls_json)
+    .bind(total_diff)
+    .execute(&pool)
+    .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+pub(crate) async fn insert_test_block(
+    db: String,
+    blockheight: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect(&db).await?;
+
+    sqlx::query(
+        r#"
+                INSERT INTO blocks (
+                    blockheight, blockhash, confirmed, workername, username,
+                    diff, time_found, coinbasevalue, rewards_processed
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (blockheight) DO NOTHING
+                "#,
+    )
+    .bind(blockheight)
+    .bind(format!(
+        "00000000000000000008a89e854d57e5667df88f1bc3ba94de4c2d1f8c{:08x}",
+        blockheight
+    ))
+    .bind(true)
+    .bind("test_worker")
+    .bind("test_user")
+    .bind(1000000.0)
+    .bind("2024-01-01 12:00:00")
+    .bind(625000000i64)
+    .bind(false)
+    .execute(&pool)
+    .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+pub async fn insert_test_account_with_diff(
+    database_url: String,
+    username: &str,
+    lnurl: Option<&str>,
+    total_diff: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+
+    let pool: Pool<Postgres> = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO accounts (username, lnurl, total_diff, created_at, updated_at)
+         VALUES ($1, $2, $3, NOW(), NOW())",
+    )
+    .bind(username)
+    .bind(lnurl)
+    .bind(total_diff)
+    .execute(&pool)
+    .await?;
+
+    pool.close().await;
+    Ok(())
+}
+
+pub async fn insert_test_payout(
+    database_url: String,
+    username: &str,
+    amount: i64,
+    diff_paid: i64,
+    status: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+
+    let pool: Pool<Postgres> = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO payouts (account_id, amount, diff_paid, blockheight_start, blockheight_end, status)
+         SELECT id, $2, $3, 0, 100, $4 FROM accounts WHERE username = $1",
+    )
+        .bind(username)
+        .bind(amount)
+        .bind(diff_paid)
+        .bind(status)
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+    Ok(())
+}

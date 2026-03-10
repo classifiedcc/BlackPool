@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+
+VERSION=${REF#"refs/tags/"}
+DIST=`pwd`/dist
+
+echo "Packaging blackpool $VERSION for $TARGET..."
+
+test -f Cargo.lock || cargo generate-lockfile
+
+echo "Building blackpool..."
+RUSTFLAGS="--deny warnings $TARGET_RUSTFLAGS" \
+  cargo build --bin blackpool --target $TARGET --release
+EXECUTABLE=target/$TARGET/release/blackpool
+
+if [[ $OS == windows-latest ]]; then
+  EXECUTABLE=$EXECUTABLE.exe
+fi
+
+echo "Copying release files..."
+mkdir -p dist/blackpool-$VERSION
+cp \
+  $EXECUTABLE \
+  Cargo.lock \
+  Cargo.toml \
+  LICENSE \
+  README.md \
+  $DIST/blackpool-$VERSION
+
+cd $DIST
+echo "Creating release archive..."
+case $OS in
+  ubuntu-latest | macos-latest)
+    ARCHIVE=$DIST/blackpool-$VERSION-$TARGET.tar.gz
+    tar czf $ARCHIVE *
+    echo "archive=$ARCHIVE" >> $GITHUB_OUTPUT
+    ;;
+  windows-latest)
+    ARCHIVE=$DIST/blackpool-$VERSION-$TARGET.zip
+    7z a $ARCHIVE *
+    echo "archive=`pwd -W`/blackpool-$VERSION-$TARGET.zip" >> $GITHUB_OUTPUT
+    ;;
+esac
