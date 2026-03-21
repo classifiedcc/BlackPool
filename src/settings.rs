@@ -278,13 +278,18 @@ impl Settings {
 
         let mut checks = 0;
         let rpc_chain = loop {
-            match client.get_blockchain_info().await {
-                Ok(blockchain_info) => {
-                    break match blockchain_info.chain.to_string().as_str() {
-                        "bitcoin" => Chain::Mainnet,
+            // Use raw call to avoid GetBlockchainInfo struct (BC 28 may omit bits/target)
+            match client.call_raw::<serde_json::Value>("getblockchaininfo", &[]).await {
+                Ok(val) => {
+                    let chain = val
+                        .get("chain")
+                        .and_then(|c| c.as_str())
+                        .ok_or_else(|| anyhow!("getblockchaininfo missing 'chain' field"))?;
+                    break match chain {
+                        "main" | "bitcoin" => Chain::Mainnet,
                         "regtest" => Chain::Regtest,
                         "signet" => Chain::Signet,
-                        "testnet" => Chain::Testnet,
+                        "test" | "testnet" => Chain::Testnet,
                         "testnet4" => Chain::Testnet4,
                         other => bail!("Bitcoin RPC server on unknown chain: {other}"),
                     };

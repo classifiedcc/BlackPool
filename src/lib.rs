@@ -27,9 +27,7 @@ use {
         secp256k1::Secp256k1,
         sign_message::MessageSignature,
     },
-    bitcoind_async_client::{
-        traits::Reader,
-        {Auth, Client as BitcoindClient},
+    bitcoind_async_client::{Auth, Client as BitcoindClient},
     },
     block_template::BlockTemplate,
     boilerplate::{Boilerplate, Trusted},
