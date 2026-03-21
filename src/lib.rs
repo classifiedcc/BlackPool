@@ -28,7 +28,6 @@ use {
         sign_message::MessageSignature,
     },
     bitcoind_async_client::{Auth, Client as BitcoindClient},
-    },
     block_template::BlockTemplate,
     boilerplate::{Boilerplate, Trusted},
     chain::Chain,
