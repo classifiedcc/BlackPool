@@ -31,9 +31,12 @@ impl Default for BlockTemplate {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 pub(crate) struct GetBlockTemplate {
-    pub(crate) bits: Nbits,
+    #[serde(default)]
+    pub(crate) bits: Option<String>,
+    #[serde(default)]
+    pub(crate) target: Option<String>,
     #[serde(rename = "previousblockhash")]
     pub(crate) previous_block_hash: BlockHash,
     #[serde(rename = "curtime", deserialize_with = "ntime_from_u64")]
@@ -53,13 +56,33 @@ pub(crate) struct GetBlockTemplate {
     pub(crate) coinbase_value: Amount,
 }
 
-impl From<GetBlockTemplate> for BlockTemplate {
-    fn from(raw: GetBlockTemplate) -> Self {
+impl GetBlockTemplate {
+    fn resolve_bits(&self) -> Result<Nbits, String> {
+        if let Some(ref bits_hex) = self.bits {
+            Nbits::from_str(bits_hex).map_err(|e| e.to_string())
+        } else if let Some(ref target_hex) = self.target {
+            let bytes = hex::decode(target_hex).map_err(|e| e.to_string())?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| "target must be 32 bytes (64 hex chars)".to_string())?;
+            let target = Target::from_be_bytes(arr);
+            Ok(Nbits::from(target.to_compact_lossy()))
+        } else {
+            Err("getblocktemplate must include 'bits' or 'target'".to_string())
+        }
+    }
+}
+
+impl TryFrom<GetBlockTemplate> for BlockTemplate {
+    type Error = String;
+
+    fn try_from(raw: GetBlockTemplate) -> Result<Self, Self::Error> {
+        let bits = raw.resolve_bits()?;
         let merkle_branches =
             stratum::merkle_branches(raw.transactions.iter().map(|tx| tx.txid).collect());
 
-        Self {
-            bits: raw.bits,
+        Ok(Self {
+            bits,
             previous_block_hash: raw.previous_block_hash,
             current_time: raw.current_time,
             height: raw.height,
@@ -69,9 +92,10 @@ impl From<GetBlockTemplate> for BlockTemplate {
             coinbaseaux: raw.coinbaseaux,
             coinbase_value: raw.coinbase_value,
             merkle_branches,
-        }
+        })
     }
 }
+
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct TemplateTransaction {

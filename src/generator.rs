@@ -65,7 +65,8 @@ async fn get_block_template(
         .call_raw("getblocktemplate", &[params])
         .await?;
 
-    let block_template = BlockTemplate::from(gbt);
+    let block_template = BlockTemplate::try_from(gbt)
+        .map_err(|e| anyhow!("Failed to parse getblocktemplate: {e}"))?;
 
     info!("New block template for height {}", block_template.height);
 
