@@ -61,11 +61,12 @@ async fn get_block_template(
         "rules": rules,
     });
 
-    let gbt: block_template::GetBlockTemplate = bitcoin_rpc_client
+    // Fetch as raw JSON to support both "bits" (older BC) and "target" (BC 28+) formats
+    let raw: serde_json::Value = bitcoin_rpc_client
         .call_raw("getblocktemplate", &[params])
         .await?;
 
-    let block_template = BlockTemplate::try_from(gbt)
+    let block_template = block_template::BlockTemplate::from_json_value(raw)
         .map_err(|e| anyhow!("Failed to parse getblocktemplate: {e}"))?;
 
     info!("New block template for height {}", block_template.height);
