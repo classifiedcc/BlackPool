@@ -18,6 +18,7 @@ pub(crate) fn router(
         .layer(Extension(bitcoin_client))
         .layer(Extension(chain))
         .layer(Extension(logs))
+        .layer(http_server::pool_cors_layer())
 }
 
 async fn home(Extension(chain): Extension<Chain>) -> Response {

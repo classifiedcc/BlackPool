@@ -6,9 +6,11 @@ use {
             Path,
             ws::{Message, WebSocketUpgrade},
         },
+        http::{HeaderValue, Method},
     },
     error::{OptionExt, ServerError, ServerResult},
     sysinfo::DiskRefreshKind,
+    tower_http::cors::{AllowOrigin, Any, CorsLayer},
 };
 
 pub(crate) mod accept_json;
@@ -236,6 +238,19 @@ pub(crate) async fn ws_logs(
             _ = recv_task => {}
         }
     })
+}
+
+/// Cross-origin access for the public pool API (Hugo site, local `hugo server`).
+pub(crate) fn pool_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list([
+            HeaderValue::from_static("http://localhost:1313"),
+            HeaderValue::from_static("http://127.0.0.1:1313"),
+            HeaderValue::from_static("https://classifiedbtc.com"),
+            HeaderValue::from_static("https://www.classifiedbtc.com"),
+        ]))
+        .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
+        .allow_headers(Any)
 }
 
 pub(crate) fn common_routes() -> axum::Router {
